@@ -1,0 +1,242 @@
+/*
+ * Copyright (c) 2011-2021 VMware Inc. or its affiliates, All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import org.gradle.util.VersionNumber
+import java.text.SimpleDateFormat
+
+buildscript {
+	repositories {
+		mavenCentral()
+		maven { url "https://repo.spring.io/plugins-release" }
+	}
+}
+
+
+plugins {
+	alias(libs.plugins.kotlin)
+	alias(libs.plugins.artifactory)
+	alias(libs.plugins.shadow)
+	alias(libs.plugins.asciidoctor.convert) apply false
+	alias(libs.plugins.asciidoctor.pdf) apply false
+	alias(libs.plugins.japicmp)
+	alias(libs.plugins.download)
+	alias(libs.plugins.testsets)
+	// note: build scan plugin now must be applied in settings.gradle
+	// plugin portal is now outdated due to bintray sunset, at least for artifactory gradle plugin
+	alias(libs.plugins.bnd) apply false
+	alias(libs.plugins.nohttp)
+	alias(libs.plugins.jcstress) apply false
+	alias(libs.plugins.spotless)
+}
+
+apply plugin: "io.reactor.gradle.detect-ci"
+apply from: "gradle/asciidoc.gradle" // asciidoc (which is generated from root dir)
+apply from: "gradle/releaser.gradle"
+apply from: "gradle/dependencies.gradle"
+
+repositories { //needed at root for asciidoctor and nohttp-checkstyle
+	mavenCentral()
+}
+
+ext {
+	jdk = JavaVersion.current().majorVersion
+	jdkJavadoc = "https://docs.oracle.com/javase/$jdk/docs/api/"
+	if (JavaVersion.current().isJava11Compatible()) {
+		jdkJavadoc = "https://docs.oracle.com/en/java/javase/$jdk/docs/api/"
+	}
+	println "JDK Javadoc link for this build is ${rootProject.jdkJavadoc}"
+
+	versionNumber = VersionNumber.parse(version.toString())
+	if (versionNumber.qualifier == null || versionNumber.qualifier.size() == 0) {
+		osgiVersion = "${version}.RELEASE"
+		println "$version is a release, will use $osgiVersion for bnd"
+	}
+	else if (versionNumber.qualifier.equalsIgnoreCase("SNAPSHOT")) {
+		def sdf = new SimpleDateFormat("yyyyMMddHHmm");
+		sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+		def buildTimestamp = sdf.format(new Date())
+		osgiVersion = "${versionNumber.major}.${versionNumber.minor}.${versionNumber.micro}.BUILD-$buildTimestamp"
+		println "$version is a snapshot, will use $osgiVersion for bnd"
+	}
+	else {
+		osgiVersion = "${versionNumber.major}.${versionNumber.minor}.${versionNumber.micro}.${versionNumber.qualifier}"
+		println "$version is neither release nor snapshot, will use $osgiVersion for bnd"
+	}
+
+	/*
+	 * Note that all dependencies and their versions are now defined in
+	 * ./gradle/libs.versions.toml
+	 */
+}
+
+// only publish scan if a specific gradle entreprise server is passed
+// typically, for local usage, you would temporarily set the env with:
+// `GRADLE_ENTERPRISE_URL=https://myge.example.com/ gradle foo`
+if (System.getenv('GRADLE_ENTERPRISE_URL')) {
+	gradleEnterprise {
+		buildScan {
+			captureTaskInputFiles = true
+			obfuscation {
+				ipAddresses { addresses -> addresses.collect { '0.0.0.0' } }
+			}
+			publishAlways()
+			server = System.getenv('GRADLE_ENTERPRISE_URL')
+		}
+	}
+}
+
+nohttp {
+	source.exclude "docs/asciidoc/highlight/**"
+	source.exclude "**/build/reports/tests/**/*.html"
+	allowlistFile = project.file('codequality/nohttp/allowlist.lines')
+}
+
+//spotless {
+//	if (project.hasProperty("spotlessFrom")) {
+//		if (project.spotlessFrom == "ALL") {
+//			println "[Spotless] Ratchet deactivated"
+//		}
+//		else {
+//			println "[Spotless] Ratchet from $project.spotlessFrom"
+//			ratchetFrom project.spotlessFrom
+//		}
+//	}
+//	else if (isCiServer) {
+//		println "[Spotless] CI detected without explicit branch, not enforcing check"
+//		enforceCheck false
+//	}
+//	else {
+//		String spotlessBranch = "origin/3.4.x"
+//		println "[Spotless] Local run detected, ratchet from $spotlessBranch"
+//		ratchetFrom spotlessBranch
+//	}
+//	java {
+//		target '**/*.java'
+//		targetExclude '**/java8stubs/**/*', '**/java9stubs/**/*', '**/scrabble/**/*',
+//			'reactor-core/src/main/java/reactor/util/annotation/NonNull.java',
+//			'reactor-core/src/main/java/reactor/util/annotation/NonNullApi.java',
+//			'reactor-core/src/main/java/reactor/util/annotation/Nullable.java'
+//		licenseHeaderFile('codequality/spotless/licenseSlashstarStyle.txt')
+//	}
+//}
+
+configure(subprojects) { p ->
+	apply plugin: 'java'
+	apply plugin: 'jacoco'
+	apply from: "${rootDir}/gradle/setup.gradle"
+
+	description = 'Non-Blocking Reactive Foundation for the JVM'
+	group = 'io.projectreactor'
+
+	repositories {
+		mavenCentral()
+		maven { url "https://oss.sonatype.org/content/repositories/releases/" }
+
+		mavenLocal()
+		if (version.endsWith('-SNAPSHOT') || version.contains('-SNAPSHOT-')) { //classic or customized snapshots
+			//do not wait for Maven Central when going back to snapshots and comparing for baseline
+			maven { url 'https://repo.spring.io/release' }
+			maven { url 'https://repo.spring.io/snapshot' }
+		}
+		maven { url 'https://repo.spring.io/milestone' }
+	}
+
+	jacocoTestReport {
+		reports {
+			xml.required = true
+			html.required = true
+		}
+	}
+
+	// includes for base test task (see below for additional common configurations)
+	test {
+		include '**/*Tests.*'
+		include '**/*Test.*'
+	}
+
+	// all test tasks will show FAILED for each test method,
+	// common exclusions, no scanning
+	p.tasks.withType(Test).all {
+		testLogging {
+			events "FAILED"
+			showExceptions true
+			exceptionFormat "FULL"
+			maxGranularity -1
+		}
+
+		// show progress by displaying test classes, avoiding test suite timeouts
+		TestDescriptor last
+		beforeTest { TestDescriptor td ->
+			if (last != td.getParent() && td.getParent().toString().startsWith("Test class")) {
+				last = td.getParent()
+				println last
+			}
+		}
+
+		if (JavaVersion.current().isJava9Compatible()) {
+			println "Java ${JavaVersion.current()}: lowering MaxGCPauseMillis to 20ms in ${project.name} ${name}"
+			jvmArgs = ["-XX:MaxGCPauseMillis=20"]
+		}
+
+		systemProperty("java.awt.headless", "true")
+		systemProperty("testGroups", p.properties.get("testGroups"))
+		scanForTestClasses = false
+		exclude '**/*Abstract*.*'
+		exclude '**/*OperatorTest*.*'
+
+		// allow re-run of failed tests only without special test tasks failing
+		// because the filter is too restrictive
+		filter.setFailOnNoMatchingTests(false)
+
+		// display intermediate results for special test tasks
+		afterSuite { desc, result ->
+			if (!desc.parent) { // will match the outermost suite
+				println('\n' + "${desc} Results: ${result.resultType} (${result.testCount} tests, ${result.successfulTestCount} successes, ${result.failedTestCount} failures, ${result.skippedTestCount} skipped)")
+			}
+		}
+	}
+}
+
+assemble.dependsOn docsZip
+
+configure(subprojects) { p ->
+	// these apply once the above configure is done, but before project-specific build.gradle have applied
+	apply plugin: "io.reactor.gradle.java-conventions"
+	apply from: "${rootDir}/gradle/javadoc.gradle"
+
+	// these apply AFTER project-specific build.gradle have applied
+	afterEvaluate {
+		if (p.plugins.hasPlugin("kotlin")) {
+			println "Applying Kotlin conventions to ${p.name}"
+			compileKotlin {
+				kotlinOptions {
+					jvmTarget = "1.8"
+					freeCompilerArgs = ["-Xjsr305=strict"]
+					languageVersion = "1.3" //TODO kotlin languageVersion 1.3 is now deprecated
+					apiVersion = "1.3"
+				}
+			}
+			compileTestKotlin {
+				kotlinOptions {
+					jvmTarget = "1.8"
+					freeCompilerArgs = ["-Xjsr305=strict"]
+					languageVersion = "1.3" //TODO kotlin languageVersion 1.3 is now deprecated
+					apiVersion = "1.3"
+				}
+			}
+		}
+	}
+}

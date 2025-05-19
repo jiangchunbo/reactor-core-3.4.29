@@ -1,0 +1,335 @@
+/*
+ * Copyright (c) 2011-2022 VMware Inc. or its affiliates, All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import me.champeau.gradle.japicmp.JapicmpTask
+
+apply plugin: 'idea' // needed to avoid IDEA seeing the jmh folder as source
+apply plugin: 'biz.aQute.bnd.builder'
+apply plugin: 'org.unbroken-dome.test-sets'
+apply plugin: 'kotlin'
+apply plugin: 'jcstress'
+
+ext {
+	bndOptions = [
+		"Export-Package": [
+			"!*internal*",
+			"!reactor.blockhound*",
+			"reactor.*;version=$osgiVersion"
+		].join(","),
+		"Import-Package": [
+			"!javax.annotation",
+			"!javax.annotation.meta",
+			'org.slf4j;resolution:=optional;version="[1.5.4,2)"',
+			"kotlin.*;resolution:=optional",
+			"reactor.blockhound.*;resolution:=optional",
+			"io.micrometer.*;resolution:=optional",
+			"*"
+		].join(","),
+		"Bundle-Name" : "reactor-core",
+		"Bundle-SymbolicName" : "io.projectreactor.reactor-core",
+		"Bundle-Version" : "$osgiVersion"
+	]
+}
+
+testSets {
+	blockHoundTest
+	withMicrometerTest
+	tckTest
+}
+
+configurations {
+	compileOnly.extendsFrom jsr166backport
+	testCompileOnly.extendsFrom jsr166backport
+}
+
+dependencies {
+	// Reactive Streams
+	api libs.reactiveStreams
+	tckTestImplementation (libs.reactiveStreams.tck) {
+		/*
+		Without this exclusion, testng brings an old version of junit (3.8.1).
+		TestNG later versions can also bring JUnit 4.x which themselves bring an old version of hamcrest
+		which gets picked up first and that we don't want. TCK runs fine w/o (old) junit 3/4.
+
+		We exclude the old JUnit, and for safety we also explicitly require latest versions of
+		TestNG separately below.
+
+		reactive streams 1.0.3 -> testng 5.14.10 -> Junit 3.8.1
+		testng 6.8.5 -> Junit 4.10 -> Hamcrest 1.1
+		testng 7.4.0 (latest as of this comment) -> JUnit 4.13 -> Hamcrest 1.3
+		*/
+		exclude group: 'junit', module: 'junit'
+	}
+	tckTestImplementation "org.testng:testng:$testngVersion"
+
+	// JSR-305 annotations
+	compileOnly libs.jsr305
+	testCompileOnly libs.jsr305
+
+	// Optional Logging Operator
+	compileOnly "org.slf4j:slf4j-api:$slf4jVersion"
+	testCompileOnly "org.slf4j:slf4j-api:$slf4jVersion"
+
+	// Optional Metrics
+	compileOnly libs.micrometer
+
+	// Not putting kotlin-stdlib as implementation to not force it as a transitive lib
+	compileOnly libs.kotlin.stdlib
+	testImplementation libs.kotlin.stdlib
+
+	// Optional BlockHound support
+	compileOnly "io.projectreactor.tools:blockhound:$blockhoundVersion"
+	// Also make BlockHound visible in the CP of dedicated testset
+	blockHoundTestImplementation "io.projectreactor.tools:blockhound:$blockhoundVersion"
+
+	// Optional JDK 9 Converter
+	jsr166backport libs.jsr166backport
+
+	// Testing
+	testImplementation platform("org.junit:junit-bom:$junitVersion")
+	testImplementation "org.junit.jupiter:junit-jupiter-api"
+	testImplementation "org.junit.platform:junit-platform-launcher"
+	testImplementation "org.junit.jupiter:junit-jupiter-params"
+	testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine"
+	testImplementation(project(":reactor-test")) {
+		exclude module: 'reactor-core'
+	}
+	testImplementation "ch.qos.logback:logback-classic:$logbackVersion" //need to access API to decrease some tests verbosity
+	testImplementation "org.assertj:assertj-core:$assertjVersion"
+	testImplementation "org.mockito:mockito-core:$mockitoVersion"
+	testImplementation "org.openjdk.jol:jol-core:$javaObjectLayoutVersion"
+	testImplementation "org.awaitility:awaitility:$awaitilityVersion"
+	testImplementation "com.pivovarit:throwing-function:$throwingFunctionVersion"
+	testImplementation "com.tngtech.archunit:archunit:$archUnitVersion"
+
+	// withMicrometerTest is a test-set that validates what happens when micrometer *IS*
+	// on the classpath. Needs sourceSets.test.output because tests there use helpers like AutoDisposingRule etc.
+	withMicrometerTestImplementation libs.micrometer
+	withMicrometerTestImplementation sourceSets.test.output
+
+	jcstressImplementation(project(":reactor-test")) {
+		exclude module: 'reactor-core'
+	}
+	jcstressImplementation "ch.qos.logback:logback-classic:$logbackVersion"
+
+}
+
+task downloadBaseline(type: Download) {
+	onlyIfNewer true
+	compress true
+
+	src "${repositories.mavenCentral().url}io/projectreactor/reactor-core/${libs.versions.baseline.core.api.get()}/reactor-core-${libs.versions.baseline.core.api.get()}.jar"
+	dest "${buildDir}/baselineLibs/reactor-core-${libs.versions.baseline.core.api.get()}.jar"
+}
+
+def japicmpReport = tasks.register('japicmpReport') {
+	onlyIf {
+		japicmp.state.failure != null
+	}
+	doLast {
+		def reportFile = file("${project.buildDir}/reports/japi.txt")
+		if (reportFile.exists()) {
+			println "\n **********************************"
+			println " * /!\\ API compatibility failures *"
+			println " **********************************"
+			println "Japicmp report was filtered and interpreted to find the following incompatibilities:"
+			reportFile.eachLine {
+				if (it.contains("*") && (!it.contains("***") || it.contains("****")))
+					println "source incompatible change: $it"
+				else if (it.contains("!"))
+					println "binary incompatible change: $it"
+			}
+		}
+		else println "No incompatible change to report"
+	}
+}
+
+task japicmp(type: JapicmpTask) {
+	if (project.gradle.startParameter.isOffline()) {
+		println "Offline: skipping downloading of baseline and JAPICMP"
+		enabled = false
+	}
+	else if ("${libs.versions.baseline.core.api.get()}" == "SKIP") {
+		println "SKIP: Instructed to skip the baseline comparison"
+		enabled = false
+	}
+	else {
+		println "Will download and perform baseline comparison with ${libs.versions.baseline.core.api.get()}"
+		dependsOn(downloadBaseline)
+		dependsOn(jar)
+		finalizedBy(japicmpReport)
+	}
+
+	oldClasspath.from(files("${buildDir}/baselineLibs/reactor-core-${libs.versions.baseline.core.api.get()}.jar"))
+	newClasspath.from(files(jar.archiveFile))
+	// these onlyXxx parameters result in a report that is slightly too noisy, but better than
+	// onlyBinaryIncompatibleModified = true which masks source-incompatible-only changes
+	onlyBinaryIncompatibleModified = false
+	onlyModified = true
+	failOnModification = true
+	failOnSourceIncompatibility = true
+	txtOutputFile = file("${project.buildDir}/reports/japi.txt")
+	ignoreMissingClasses = true
+	includeSynthetic = true
+	compatibilityChangeExcludes = [ "METHOD_NEW_DEFAULT" ]
+
+	// TODO after a .0 release, bump the gradle.properties baseline
+	// TODO after a .0 release, remove the reactor-core exclusions below if any
+	classExcludes = [ ]
+	methodExcludes = [ ]
+}
+
+gradle.taskGraph.afterTask { task, state ->
+	if (task instanceof JapicmpTask && state.failure && ((JapicmpTask) task).richReport == null) {
+		//FIXME print the rich report somehow on console ?
+		print file("${project.buildDir}/reports/japi.txt").getText()
+	}
+}
+
+// complements the javadoc.gradle common configuration
+javadoc {
+	options.overview = "$rootDir/docs/api/overview.html"
+	excludes = [
+			// Must be public due to the ServiceLoader's requirements
+			"reactor/core/scheduler/ReactorBlockHoundIntegration.java"
+	]
+	doLast {
+		// work around https://github.com/gradle/gradle/issues/4046
+		copy {
+			from('src/main/java')
+			into "$project.buildDir/docs/javadoc/"
+			include "**/doc-files/**/*"
+		}
+	}
+}
+
+task loops(type: Test, group: 'verification') {
+	include '**/*Loop.*'
+	doFirst {
+		println "Additional tests from `loops` ($includes)"
+	}
+}
+
+tasks.withType(Test).all {
+	if (it.name == "test") {
+		//configure tag support for the core test task
+		def tags = rootProject.findProperty("junit-tags")
+		if (tags != null) {
+			println "junit5 tags for core: $tags"
+			useJUnitPlatform() {
+				includeTags "$tags"
+			}
+		}
+		else {
+			useJUnitPlatform()
+		}
+	}
+	else if (it.name != "tckTest") {
+		//default to JunitPlatform
+		useJUnitPlatform()
+	}
+}
+
+tckTest {
+	useTestNG()
+	include '**/*Verification.*'
+	doFirst {
+		println "Additional tests from `${name}` (${includes})"
+	}
+}
+
+
+blockHoundTest {
+	// Creates a JVM per test because the agent can be installed only once
+	forkEvery = 1
+	maxParallelForks = 1
+}
+
+jcstress {
+	mode = 'quick' //quick, default, tough
+    jcstressDependency 'org.openjdk.jcstress:jcstress-core:0.16'
+	heapPerFork = 512
+}
+
+// inherit basic test task + common configuration in root
+// always depend on withMicrometerTest, blockHoundTest and tckTest, skip loops when not releasing
+// note that this way the tasks can be run individually
+check {
+	dependsOn withMicrometerTest
+	dependsOn blockHoundTest
+	dependsOn tckTest
+	if (!version.endsWith('-SNAPSHOT') && !version.contains('-SNAPSHOT-')) { //neither classic nor customized snapshots
+		dependsOn loops
+	}
+	dependsOn tasks.jcstress
+}
+
+// TODO all java9 / stubs / java-specific stuff should go in a convention plugin ?
+if (!JavaVersion.current().isJava9Compatible()) {
+	test {
+		jvmArgs = ["-Xbootclasspath/p:" + configurations.jsr166backport.asPath]
+	}
+}
+
+jar {
+	manifest {
+		attributes 'Implementation-Title': 'reactor-core',
+			'Implementation-Version': project.version,
+			'Automatic-Module-Name': 'reactor.core'
+	}
+	bnd(bndOptions)
+}
+
+jacocoTestReport.dependsOn test
+check.dependsOn jacocoTestReport
+check.dependsOn japicmp
+
+
+if (JavaVersion.current().java9Compatible) {
+	// SharedSecretsCallSiteSupplierFactory is a Java 8 specific optimization.
+	// It uses sun.misc.SharedSecrets which is unavailable on Java 9+, and the compilation would fail with JDK 9.
+	// This workaround allows compiling the main sourceset on JDK 9+ while still referring to the Java 8 classes.
+
+	sourceSets {
+		java8stubs.java.srcDirs = ['src/main/java8stubs']
+	}
+
+	tasks.withType(JavaCompile).all {
+		sourceCompatibility = targetCompatibility = 8
+	}
+
+	tasks.withType(Javadoc).all {
+		excludes = ["reactor/core/publisher/Traces.java"]
+	}
+
+	dependencies {
+		compileOnly sourceSets.java8stubs.output
+	}
+}
+else {
+	// reactor.core.publisher.Traces contains a strategy that only works with Java 9+.
+	// While compiling on Java 8, we can't access Java 9+ APIs.
+	// To workaround this, we "link" the main sourceset to the stubs of Java 9 APIs without having to use the Java 9 target.
+	sourceSets {
+		java9stubs.java.srcDirs = ['src/main/java9stubs']
+	}
+
+	dependencies {
+		compileOnly sourceSets.java9stubs.output
+	}
+}
+
+// docs.zip is added in afterEvaluate block in setup.gradle
