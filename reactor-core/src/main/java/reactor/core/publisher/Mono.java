@@ -3093,6 +3093,9 @@ public abstract class Mono<T> implements CorePublisher<T> {
      * value emitted by another {@link Mono} (possibly changing the value type).
      *
      * <p>
+     * 对数据流中的每个元素 T，应用你提供的 Function，并将其转换成一个 Mono
+     *
+     * <p>
      * <img class="marble" src="doc-files/marbles/flatMapForMono.svg" alt="">
      *
      * @param transformer the function to dynamically bind a new {@link Mono}
