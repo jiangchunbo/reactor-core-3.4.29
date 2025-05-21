@@ -33,7 +33,7 @@ import reactor.core.Scannable;
 final class SingleWorkerScheduler implements Scheduler, Executor, Scannable {
 
     final Worker main;
-    
+
     SingleWorkerScheduler(Scheduler actual) {
         this.main = actual.createWorker();
     }
@@ -55,7 +55,7 @@ final class SingleWorkerScheduler implements Scheduler, Executor, Scannable {
 
     @Override
     public Disposable schedulePeriodically(Runnable task, long initialDelay,
-            long period, TimeUnit unit) {
+                                           long period, TimeUnit unit) {
         return main.schedulePeriodically(task, initialDelay, period, unit);
     }
 
@@ -63,7 +63,7 @@ final class SingleWorkerScheduler implements Scheduler, Executor, Scannable {
     public void execute(Runnable command) {
         main.schedule(command);
     }
-    
+
     @Override
     public Worker createWorker() {
         return new ExecutorScheduler.ExecutorSchedulerWorker(this);

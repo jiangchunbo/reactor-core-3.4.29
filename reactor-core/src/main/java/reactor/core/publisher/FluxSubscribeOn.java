@@ -59,6 +59,8 @@ final class FluxSubscribeOn<T> extends InternalFluxOperator<T, T> {
 		actual.onSubscribe(parent);
 
 		try {
+			// Scheduler.Worker 的常见实现包括（SingleWorker、ParallelWorker、BoundedElasticWorker）
+
 			worker.schedule(parent);
 		}
 		catch (RejectedExecutionException ree) {
